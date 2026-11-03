@@ -130,14 +130,12 @@ describe("failed charges", () => {
   it("claims due retries once, with a lease", async () => {
     const { pledge } = await chargingPledge();
     await fail(pledge); // retry due 2027-03-02 12:00
-    const early = (await q("select public.claim_due_retries('2027-03-02T11:59:00Z') as r"))[0].r;
-    expect(early).toEqual([]);
-    const due = (await q("select public.claim_due_retries('2027-03-02T12:00:01Z') as r"))[0].r;
-    expect(due.map((x: any) => x.pledge_id)).toEqual([pledge]);
-    const again = (await q("select public.claim_due_retries('2027-03-02T12:00:02Z') as r"))[0].r;
-    expect(again).toEqual([]); // leased
-    const later = (await q("select public.claim_due_retries('2027-03-02T13:01:00Z') as r"))[0].r;
-    expect(later).toHaveLength(1); // lease expired: not lost
+    const claim = async (at: string) =>
+      ((await q("select public.claim_due_retries($1::timestamptz) as r", [at]))[0].r as any[]).filter((x) => x.pledge_id === pledge);
+    expect(await claim("2027-03-02T11:59:00Z")).toEqual([]);
+    expect(await claim("2027-03-02T12:00:01Z")).toHaveLength(1);
+    expect(await claim("2027-03-02T12:00:02Z")).toEqual([]); // leased
+    expect(await claim("2027-03-02T13:01:00Z")).toHaveLength(1); // lease expired: not lost
   });
 
   it("a payment needing authentication is parked with an action token, not retried", async () => {
@@ -194,6 +192,16 @@ describe("refunds", () => {
     expect(net).toBe(-320); // income - refund = 0, fee reversed, only the processor fee remains
   });
 
+  it("refund events carry a running total: only the difference is recorded", async () => {
+    const { pledge } = await chargingPledge();
+    await succeed({ pledge });
+    await refund(pledge, 2500, false);
+    await refund(pledge, 10000, false);
+    expect((await refund(pledge, 10000, false)).outcome).toBe("no_change");
+    const r = await q("select amount_cents from public.ledger_entries where pledge_id=$1 and kind='refund' order by created_at", [pledge]);
+    expect(r.map((x) => x.amount_cents)).toEqual([-2500, -7500]);
+  });
+
   it("a partial refund records the refund only", async () => {
     const { pledge } = await chargingPledge();
     await succeed({ pledge });
@@ -211,6 +219,16 @@ describe("refunds", () => {
     await refund(pledge, 10000, false, e);
     expect((await refund(pledge, 10000, false, e)).outcome).toBe("duplicate");
     expect(await q("select 1 from public.ledger_entries where pledge_id=$1 and kind='refund'", [pledge])).toHaveLength(1);
+  });
+});
+
+describe("charge lease", () => {
+  it("new charges get a 15-minute lease so a crash mid-charge is picked up again", async () => {
+    const { pledge } = await chargingPledge();
+    const row = (await q("select next_attempt_at > now() + interval '14 minutes' and next_attempt_at < now() + interval '16 minutes' as ok from public.pledges where id=$1", [pledge]))[0];
+    expect(row.ok).toBe(true);
+    const due = (await q("select public.claim_due_retries(now() + interval '16 minutes') as r"))[0].r;
+    expect(due.map((x: any) => x.pledge_id)).toContain(pledge);
   });
 });
 

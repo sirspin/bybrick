@@ -7,13 +7,6 @@
 -- ------------------------------------------------------------------- columns
 alter table public.businesses add column stripe_onboarded_at timestamptz;
 
-alter table public.pledges
-  add column charge_attempts   smallint not null default 0,
-  add column next_attempt_at   timestamptz,
-  add column last_error_code   text,
-  -- SHA-256 of the token in the "finish your payment" email (separate from the manage token).
-  add column action_token_hash bytea unique check (length(action_token_hash) = 32);
-
 -- A business takes pledges only after Stripe says card payments are active.
 create or replace view public.public_businesses as
   select id, slug, name, legal_name, owner_display, owner_line, owner_photo_url, tagline,
@@ -82,6 +75,7 @@ begin
   return jsonb_build_object(
     'business', jsonb_build_object(
       'id', b.id, 'name', b.name, 'legal_name', b.legal_name, 'slug', b.slug,
+      'contact_email', b.contact_email,
       'stripe_account_id', b.stripe_account_id,
       'ready', b.stripe_account_id is not null and b.stripe_onboarded_at is not null),
     'item', item_json);
@@ -300,9 +294,10 @@ begin
 end;
 $$;
 
--- charge.refunded. A full refund that also refunds the platform fee reverses the fee entry.
+-- charge.refunded. Stripe reports the running total refunded, so the ledger gets the difference
+-- from what is already recorded. A full refund that also refunds the platform fee reverses the fee entry.
 create function public.record_refund(
-  p_event_id text, p_account_id text, p_pledge_id uuid, p_refund_cents integer,
+  p_event_id text, p_account_id text, p_pledge_id uuid, p_total_refunded_cents integer,
   p_fee_refunded boolean, p_occurred_at timestamptz
 ) returns jsonb
 language plpgsql as $$
@@ -311,6 +306,8 @@ declare
   acct text;
   fee_entry public.ledger_entries;
   is_full boolean;
+  already integer;
+  delta integer;
 begin
   select * into p from public.pledges where id = p_pledge_id for update;
   if not found then raise exception 'pledge not found' using errcode = 'no_data_found'; end if;
@@ -326,12 +323,19 @@ begin
     return jsonb_build_object('outcome', 'duplicate');
   end if;
 
+  select coalesce(-sum(amount_cents), 0) into already
+  from public.ledger_entries where pledge_id = p.id and kind = 'refund';
+  delta := p_total_refunded_cents - already;
+  if delta <= 0 then
+    return jsonb_build_object('outcome', 'no_change');
+  end if;
+
   insert into public.ledger_entries
     (business_id, item_id, pledge_id, kind, amount_cents, tax_year, occurred_at, memo, source_event_id)
-  values (p.business_id, p.item_id, p.id, 'refund', -p_refund_cents,
+  values (p.business_id, p.item_id, p.id, 'refund', -delta,
           private.tax_year(p_occurred_at), p_occurred_at, 'Refund issued by the business', p_event_id || ':refund');
 
-  is_full := p_refund_cents >= p.charge_cents;
+  is_full := p_total_refunded_cents >= p.charge_cents;
   if is_full and p_fee_refunded then
     select * into fee_entry from public.ledger_entries
     where pledge_id = p.id and kind = 'platform_fee'

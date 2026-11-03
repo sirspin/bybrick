@@ -112,7 +112,8 @@ begin
     allocated := allocated + chg;
 
     if chg > 0 then
-      update public.pledges set charge_cents = chg, status = 'charging'
+      update public.pledges
+        set charge_cents = chg, status = 'charging', next_attempt_at = now() + interval '15 minutes'
         where id = r.id returning * into r;
       out := out || private.charge_json(r);
     else
@@ -441,7 +442,8 @@ begin
   for r in
     select * from public.pledges where item_id = p_item_id and status = 'pending' order by created_at, id
   loop
-    update public.pledges set charge_cents = amount_cents, status = 'charging'
+    update public.pledges
+      set charge_cents = amount_cents, status = 'charging', next_attempt_at = now() + interval '15 minutes'
       where id = r.id returning * into r;
     charges := charges || private.charge_json(r);
   end loop;

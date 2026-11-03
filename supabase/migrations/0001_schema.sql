@@ -90,6 +90,12 @@ create table public.pledges (
   consented_at             timestamptz not null,
   created_at               timestamptz not null default now(),
   charged_at               timestamptz,
+  -- Charging state. A charge attempt that crashes is picked up again when next_attempt_at passes.
+  charge_attempts          smallint not null default 0,
+  next_attempt_at          timestamptz,
+  last_error_code          text,
+  -- SHA-256 of the token in the "finish your payment" email (separate from the manage token).
+  action_token_hash        bytea unique check (length(action_token_hash) = 32),
   foreign key (item_id, business_id) references public.items (id, business_id) on delete restrict,
   check (manage_token_hash is not null or split_from_pledge_id is not null),
   check (status <> 'charged' or (charge_cents is not null and charged_at is not null))

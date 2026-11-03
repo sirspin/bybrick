@@ -170,6 +170,12 @@ begin
 end;
 $$;
 
+-- The connected Stripe account for an owner's business (server use only, never sent to a browser).
+create function public.owner_stripe_account(p_user_id uuid) returns text
+language sql stable as $$
+  select stripe_account_id from public.businesses where owner_user_id = p_user_id order by created_at limit 1;
+$$;
+
 -- ------------------------------------------------------------ public screens
 create function public.public_business_page(p_slug text) returns jsonb
 language plpgsql stable as $$
@@ -241,7 +247,7 @@ begin
     'owner_signin_allowed(text)', 'claim_business(uuid,text)', 'owner_dashboard(uuid)',
     'owner_update_business(uuid,jsonb)',
     'owner_save_item(uuid,uuid,text,text,text,integer,integer,integer,integer,timestamptz,text,text)',
-    'owner_publish_item(uuid,uuid)', 'public_business_page(text)', 'public_item_page(text,uuid)',
+    'owner_publish_item(uuid,uuid)', 'owner_stripe_account(uuid)', 'public_business_page(text)', 'public_item_page(text,uuid)',
     'manage_view(bytea)'
   ]) loop
     execute format('revoke execute on function public.%s from public, anon, authenticated', f);

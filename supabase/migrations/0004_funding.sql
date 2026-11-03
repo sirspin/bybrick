@@ -446,6 +446,8 @@ $$;
 -- -------------------------------------------------------------- permissions
 revoke execute on all functions in schema private from public, anon, authenticated;
 grant execute on all functions in schema private to service_role;
+-- RLS policies call this as the signed-in user; the blanket revoke above must not remove it.
+grant execute on function private.owns_business(uuid) to authenticated;
 
 do $$
 declare f text;

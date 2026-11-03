@@ -4,7 +4,7 @@ Item-level crowdfunding for small brick-and-mortar businesses, with an equipment
 
 ## Status
 
-Scaffold only. Built so far: Next.js app shell with security headers and a nonce-based CSP, the Postgres schema with deny-by-default access, the append-only ledger, money helpers, and their tests. Not built yet: the payment layer, owner and contributor screens, emails, the link fetcher, platform and legal pages.
+Built so far: Next.js app shell with security headers and a nonce-based CSP, the Postgres schema with deny-by-default access, the append-only ledger, the funding functions, and the Stripe payment layer (see `docs/payments.md`), with tests. Not built yet: the screens, emails, owner sign-in, the link fetcher, platform and legal pages.
 
 Stripe decisions are in `docs/stripe-verification.md`.
 

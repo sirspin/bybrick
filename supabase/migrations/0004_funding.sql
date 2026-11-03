@@ -31,6 +31,26 @@ language sql stable as $$
   );
 $$;
 
+-- How much of an item's goal is already spoken for: pledges (pending at full amount, others
+-- at what is being charged) plus owner capital recorded in the ledger, net of reversals.
+create function private.item_covered_cents(p_item uuid) returns integer
+language sql stable as $$
+  select (
+    coalesce((
+      select sum(case when status = 'pending' then amount_cents
+                      else coalesce(charge_cents, amount_cents) end)
+      from public.pledges
+      where item_id = p_item and status in ('pending', 'charging', 'requires_action', 'charged')), 0)
+    + coalesce((
+      select sum(e.amount_cents) from public.ledger_entries e
+      where e.item_id = p_item
+        and (e.kind = 'owner_capital'
+             or (e.kind = 'reversal' and exists (
+                   select 1 from public.ledger_entries o
+                   where o.id = e.reverses_entry_id and o.kind = 'owner_capital')))), 0)
+  )::integer;
+$$;
+
 create function private.charge_json(r public.pledges) returns jsonb
 language sql immutable as $$
   select jsonb_build_object(
@@ -396,20 +416,7 @@ begin
     raise exception 'item is % and cannot be closed out', it.status using errcode = 'check_violation';
   end if;
 
-  select coalesce(sum(case when status = 'pending' then amount_cents
-                           else coalesce(charge_cents, amount_cents) end), 0)
-  into covered
-  from public.pledges
-  where item_id = p_item_id and status in ('pending', 'charging', 'requires_action', 'charged');
-
-  -- Owner capital already recorded for this item (net of reversals) also covers the goal.
-  select covered + coalesce(sum(e.amount_cents), 0) into covered
-  from public.ledger_entries e
-  where e.item_id = p_item_id
-    and (e.kind = 'owner_capital'
-         or (e.kind = 'reversal' and exists (
-               select 1 from public.ledger_entries o
-               where o.id = e.reverses_entry_id and o.kind = 'owner_capital')));
+  covered := private.item_covered_cents(p_item_id);
 
   remainder := it.goal_cents - covered;
   if remainder <= 0 then

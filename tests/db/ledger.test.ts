@@ -5,7 +5,7 @@ let db: TestDb;
 let s: Awaited<ReturnType<typeof seedTwoBusinesses>>;
 let itemA: string, itemB: string, entryId: string;
 
-const insertEntry = (c: { query: Function }, o: { kind?: string; amount?: number; event: string; biz?: string; item?: string | null; reverses?: string | null }) =>
+const insertEntry = (c: { query: (...a: any[]) => Promise<any> }, o: { kind?: string; amount?: number; event: string; biz?: string; item?: string | null; reverses?: string | null }) =>
   c.query(
     `insert into public.ledger_entries (business_id, item_id, kind, amount_cents, tax_year, occurred_at, source_event_id, reverses_entry_id)
      values ($1,$2,$3,$4,2027,now(),$5,$6) returning id`,

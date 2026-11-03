@@ -31,6 +31,9 @@ create table public.businesses (
   accent_color    text not null default '#111111' check (accent_color ~ '^#[0-9a-fA-F]{6}$'),
   -- Set only by server code after Stripe onboarding. Owners cannot write it (see grants).
   stripe_account_id text unique check (stripe_account_id ~ '^acct_[A-Za-z0-9]+$'),
+  -- The email allowed to sign in as this business's owner (separate from the public contact
+  -- email). Set by the platform, not editable by owners.
+  owner_email     text check (owner_email ~ '^[^@\s]+@[^@\s]+$'),
   -- Null until the owner first signs in and the server claims the business.
   owner_user_id   uuid references auth.users (id) on delete restrict,
   created_at      timestamptz not null default now()

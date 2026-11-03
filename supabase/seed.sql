@@ -1,7 +1,9 @@
 -- SAMPLE DATA for local development and Stripe test mode only. Never load into production.
 -- Birdy's details and item prices below are placeholders until the owners supply real ones.
 -- stripe_account_id and owner_user_id stay null: the owner claims the business at first
--- sign-in, and Stripe onboarding sets the account id from server code.
+-- sign-in (the email in owner_email), and Stripe onboarding sets the account id from server code.
+-- Set the owner's sign-in email with:
+--   update public.businesses set owner_email = 'you@example.com' where slug = 'birdys';
 
 insert into public.businesses
   (slug, name, legal_name, owner_display, owner_line, tagline, story, neighborhood, city,

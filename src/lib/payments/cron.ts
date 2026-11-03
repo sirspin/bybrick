@@ -8,7 +8,7 @@ export async function sweepCharges(d: Deps): Promise<{ attempted: number }> {
   return { attempted: due.length };
 }
 
-/** Expire items past their deadline (and stale pool pledges), then clean up. Nobody is charged. */
+/** Expire items past their deadline and their pledges, then clean up. Nobody is charged. */
 export async function sweepExpiry(d: Deps): Promise<{ expired: number }> {
   const expired = await d.rpc<Array<{ pledge_id: string; stripe_payment_method_id: string | null; can_detach: boolean }>>("expire_due", {});
   for (const e of expired) {

@@ -8,7 +8,6 @@ import { CONSENT_VERSION, consentText } from "./consent";
 import { chargePledges, detachPaymentMethod } from "./charging";
 
 export const MIN_PLEDGE_CENTS = 500; // card-testing friction; lower only to finish an item
-export const MAX_POOL_PLEDGE_CENTS = 100_000;
 
 export class PledgeError extends Error {
   constructor(public code:
@@ -21,11 +20,10 @@ export class PledgeError extends Error {
 
 export const pledgeInputSchema = z.object({
   businessId: z.string().uuid(),
-  itemId: z.string().uuid().nullable(),
+  itemId: z.string().uuid(),
   name: z.string().trim().min(1).max(120).refine((s) => !/[\u0000-\u001f<>]/.test(s), "plain text only"),
   email: z.string().trim().toLowerCase().pipe(z.string().email().max(254)),
   amountCents: z.number().int().min(1).max(MAX_CENTS),
-  sendExtraToPool: z.boolean(),
   consent: z.literal(true),
   turnstileToken: z.string().min(1).max(2048),
 });
@@ -44,8 +42,7 @@ export interface PledgeIntentResult {
   consentVersion: string;
   consentText: string;
   /** Pass to the Payment Element's applePay option so Apple issues a merchant token. */
-  applePay: { paymentDescription: string; deferredBilling: { amount: number; label: string; deferredPaymentDate: string | null } };
-  target: "item" | "pool";
+  applePay: { paymentDescription: string; deferredBilling: { amount: number; label: string; deferredPaymentDate: string } };
 }
 
 /**
@@ -74,26 +71,18 @@ export async function createPledgeIntent(d: Deps, raw: unknown, ip: string | nul
   const descriptor = statementDescriptor(business.name);
   if (!descriptor) throw new PledgeError("business_not_ready");
 
-  // Decide item vs pool from what the database says now, not from what the page showed.
-  let item = ctx.item;
-  const itemOpen = !!item && item.status === "open" && !!item.deadline && new Date(item.deadline) > new Date() && item.remaining_cents > 0;
-  if (item && !itemOpen) {
-    if (!input.sendExtraToPool) throw new PledgeError("item_closed");
-    item = null; // contributor opted to go to the pool if the item filled
-  }
+  // Decide from what the database says now, not from what the page showed.
+  const item = ctx.item;
+  if (!item) throw new PledgeError("not_found");
+  const itemOpen = item.status === "open" && !!item.deadline && new Date(item.deadline) > new Date() && item.remaining_cents > 0;
+  if (!itemOpen) throw new PledgeError("item_closed");
+  if (input.amountCents > item.remaining_cents) throw new PledgeError("amount_too_high");
+  if (input.amountCents < Math.min(MIN_PLEDGE_CENTS, item.remaining_cents)) throw new PledgeError("amount_too_low");
 
-  if (item) {
-    if (input.amountCents > item.remaining_cents) throw new PledgeError("amount_too_high");
-    if (input.amountCents < Math.min(MIN_PLEDGE_CENTS, item.remaining_cents)) throw new PledgeError("amount_too_low");
-  } else {
-    if (input.amountCents < MIN_PLEDGE_CENTS) throw new PledgeError("amount_too_low");
-    if (input.amountCents > MAX_POOL_PLEDGE_CENTS) throw new PledgeError("amount_too_high");
-  }
-
-  const deadline = item?.deadline ? new Date(item.deadline) : null;
+  const deadline = new Date(item.deadline!);
   const text = consentText({
-    legalName: business.legal_name, itemName: item?.name ?? null, amountCents: input.amountCents,
-    deadline, sendExtraToPool: input.sendExtraToPool, descriptor: descriptor.descriptor,
+    legalName: business.legal_name, itemName: item.name, amountCents: input.amountCents,
+    deadline, descriptor: descriptor.descriptor,
   });
 
   const opts = { stripeAccount: business.stripe_account_id };
@@ -107,9 +96,8 @@ export async function createPledgeIntent(d: Deps, raw: unknown, ip: string | nul
       // Written by us, server-side. The browser can confirm the intent but cannot edit this.
       metadata: {
         business_id: business.id,
-        item_id: item?.id ?? "",
+        item_id: item.id,
         amount_cents: String(input.amountCents),
-        send_extra: String(input.sendExtraToPool),
         consent_version: CONSENT_VERSION,
         consented_at: new Date().toISOString(),
       },
@@ -126,15 +114,14 @@ export async function createPledgeIntent(d: Deps, raw: unknown, ip: string | nul
     consentText: text,
     applePay: {
       paymentDescription: `Pledge to ${business.name}`,
-      deferredBilling: { amount: input.amountCents, label: item?.name ?? "Pledge", deferredPaymentDate: deadline?.toISOString() ?? null },
+      deferredBilling: { amount: input.amountCents, label: item.name, deferredPaymentDate: deadline.toISOString() },
     },
-    target: item ? "item" : "pool",
   };
 }
 
 const outcomeSchema = z.object({
   pledge_id: z.string().uuid().nullable(),
-  outcome: z.enum(["pending", "funded", "moved_to_pool", "item_closed", "duplicate"]),
+  outcome: z.enum(["pending", "funded", "item_closed", "duplicate"]),
   charges: z.array(z.object({ pledge_id: z.string().uuid() })),
 });
 
@@ -174,24 +161,24 @@ export async function finalizeSetupIntent(d: Deps, setupIntentId: string, busine
 
   const amount = Number(m.amount_cents);
   if (!Number.isSafeInteger(amount) || amount <= 0) throw new PledgeError("mismatch");
-  // For the emails only. If the item id is somehow not this business's, refuse.
-  let itemName: string | null = null;
-  if (m.item_id) {
-    try {
-      itemName = (await d.rpc<Ctx>("payment_context", { p_business_id: businessId, p_item_id: m.item_id })).item?.name ?? null;
-    } catch {
-      throw new PledgeError("mismatch");
-    }
+  // The item must be this business's (also gives us its name for the emails).
+  if (!m.item_id) throw new PledgeError("mismatch");
+  let itemName: string;
+  try {
+    const itemCtx = await d.rpc<Ctx>("payment_context", { p_business_id: businessId, p_item_id: m.item_id });
+    if (!itemCtx.item) throw new Error("no item");
+    itemName = itemCtx.item.name;
+  } catch {
+    throw new PledgeError("mismatch");
   }
   const token = newToken();
 
   const res = outcomeSchema.parse(await d.rpc("create_pledge", {
     p_business_id: businessId,
-    p_item_id: m.item_id ? m.item_id : null,
+    p_item_id: m.item_id,
     p_name: customer.name,
     p_email: customer.email,
     p_amount_cents: amount,
-    p_send_extra: m.send_extra === "true",
     p_manage_token_hash: token.hashParam,
     p_consent_version: m.consent_version ?? "unknown",
     p_consented_at: m.consented_at ?? new Date().toISOString(),

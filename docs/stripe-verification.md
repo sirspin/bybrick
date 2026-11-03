@@ -1,5 +1,7 @@
 # Stripe verification (pre-payment-layer)
 
+> Update: the shared pool was removed from Phase 1, so the pool-related points below (item 4 in the summary, the pool consent variants, and decision 4) no longer apply.
+
 Read on 2026-11-03 from docs.stripe.com. Items marked UNVERIFIED are not confirmed by a page I read; they come from general knowledge and must be checked in test mode before we rely on them.
 
 ## Summary of what changes from the brief

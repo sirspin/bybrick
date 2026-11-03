@@ -28,7 +28,7 @@ const evt = () => "evt_" + crypto.randomBytes(8).toString("hex");
 async function chargingPledge(price = 10000, pm = "pm_" + crypto.randomBytes(4).toString("hex")) {
   const item = await addItem(db, biz, { price });
   const r = (await q(
-    `select public.create_pledge($1,$2,'Pat','pat@x.test',$3,false,$4,'v0',now(),'cus_1',$5,$6) as res`,
+    `select public.create_pledge($1,$2,'Pat','pat@x.test',$3,$4,'v0',now(),'cus_1',$5,$6) as res`,
     [biz, item, price, hash(), pm, "seti_" + crypto.randomBytes(5).toString("hex")]))[0].res;
   expect(r.outcome).toBe("funded");
   return { item, pledge: r.pledge_id as string, pm };
@@ -103,7 +103,7 @@ describe("payment_intent.succeeded", () => {
   it("will not charge a cancelled pledge", async () => {
     const item = await addItem(db, biz, { price: 10000 });
     const h = hash();
-    const r = (await q(`select public.create_pledge($1,$2,'P','p@x.test',3000,false,$3,'v0',now(),'c','pm',null) as res`, [biz, item, h]))[0].res;
+    const r = (await q(`select public.create_pledge($1,$2,'P','p@x.test',3000,$3,'v0',now(),'c','pm',null) as res`, [biz, item, h]))[0].res;
     await q("select public.cancel_pledge($1)", [h]);
     await q("update public.pledges set charge_cents = 3000 where id=$1", [r.pledge_id]);
     await expect(succeed({ pledge: r.pledge_id, amount: 3000 })).rejects.toThrow(/cannot be charged/);
@@ -163,7 +163,7 @@ describe("failed charges", () => {
 
   it("failure of one pledge only reports a shortfall for the share that is actually missing", async () => {
     const item = await addItem(db, biz, { price: 10000 });
-    const mk = async (amt: number) => (await q(`select public.create_pledge($1,$2,'P','p@x.test',$3,false,$4,'v0',now(),'c',$5,null) as res`, [biz, item, amt, hash(), "pm_" + amt]))[0].res;
+    const mk = async (amt: number) => (await q(`select public.create_pledge($1,$2,'P','p@x.test',$3,$4,'v0',now(),'c',$5,null) as res`, [biz, item, amt, hash(), "pm_" + amt]))[0].res;
     const a = await mk(6000);
     const b = await mk(4000);
     expect(b.outcome).toBe("funded");
@@ -245,7 +245,7 @@ describe("lookups and account state", () => {
 
   it("remaining shrinks as pledges arrive", async () => {
     const item = await addItem(db, biz, { price: 10000 });
-    await q(`select public.create_pledge($1,$2,'P','p@x.test',3000,false,$3,'v0',now(),'c','pm',null)`, [biz, item, hash()]);
+    await q(`select public.create_pledge($1,$2,'P','p@x.test',3000,$3,'v0',now(),'c','pm',null)`, [biz, item, hash()]);
     expect((await q("select public.payment_context($1,$2) as c", [biz, item]))[0].c.item.remaining_cents).toBe(7000);
   });
 

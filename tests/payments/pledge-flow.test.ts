@@ -11,7 +11,7 @@ let s: Awaited<ReturnType<typeof seedTwoBusinesses>>;
 beforeAll(async () => { db = await createTestDb(); s = await seedTwoBusinesses(db); });
 afterAll(async () => { await db?.drop(); });
 
-let biz: string, acct: string, fake: FakeStripe, h: ReturnType<typeof makeDeps>, ipN = 0;
+let biz: string, acct: string, fake: FakeStripe, h: ReturnType<typeof makeDeps>, ipN = 0, defaultItem: string;
 beforeEach(async () => {
   acct = "acct_" + crypto.randomBytes(6).toString("hex");
   biz = (await db.pool.query(
@@ -19,12 +19,13 @@ beforeEach(async () => {
      values ('t' || substr(md5(random()::text),1,8), 'BIRDY''S', 'Birdy''s LLC','O','Chicago','h@x.test',$1, now()) returning id`, [acct])).rows[0].id;
   fake = makeFakeStripe();
   h = makeDeps(db, fake);
+  defaultItem = await addItem(db, biz, { price: 100000 });
 });
 
 const q = async (sql: string, v: unknown[] = []) => (await db.pool.query(sql, v)).rows;
 const input = (over: Record<string, unknown> = {}) => ({
-  businessId: biz, itemId: null, name: "Pat Neighbor", email: `p${crypto.randomBytes(4).toString("hex")}@x.test`,
-  amountCents: 5000, sendExtraToPool: false, consent: true, turnstileToken: "tok", ...over,
+  businessId: biz, itemId: defaultItem, name: "Pat Neighbor", email: `p${crypto.randomBytes(4).toString("hex")}@x.test`,
+  amountCents: 5000, consent: true, turnstileToken: "tok", ...over,
 });
 const intent = (over: Record<string, unknown> = {}) => createPledgeIntent(h.deps, input(over), `10.0.0.${++ipN}`);
 const lastSi = () => [...fake.setupIntents.keys()].pop()!;
@@ -41,14 +42,13 @@ describe("step 1: createPledgeIntent", () => {
     const item = await addItem(db, biz, { price: 10000 });
     const r = await intent({ itemId: item, amountCents: 4000 });
     expect(r.stripeAccount).toBe(acct);
-    expect(r.target).toBe("item");
     expect(r.consentText).toContain("BIRDYS"); // the apostrophe-free statement name
     expect(r.consentText).toContain("$40");
     const [cust] = fake.callsTo("customers.create");
     const [si] = fake.callsTo("setupIntents.create");
     expect(cust!.opts).toEqual({ stripeAccount: acct });
     expect(si!.opts).toEqual({ stripeAccount: acct });
-    expect(si!.params).toMatchObject({ usage: "off_session", metadata: { business_id: biz, item_id: item, amount_cents: "4000", send_extra: "false", consent_version: "v1-draft" } });
+    expect(si!.params).toMatchObject({ usage: "off_session", metadata: { business_id: biz, item_id: item, amount_cents: "4000", consent_version: "v2-draft" } });
     expect(r.applePay.deferredBilling.amount).toBe(4000);
     // No pledge exists yet and nothing was charged.
     expect(await q("select 1 from public.pledges where business_id=$1", [biz])).toEqual([]);
@@ -70,7 +70,7 @@ describe("step 1: createPledgeIntent", () => {
     const item = await addItem(db, biz, { price: 10000 });
     expect(await code(intent({ itemId: item, amountCents: 10001 }))).toBe("amount_too_high");
     expect(await code(intent({ itemId: item, amountCents: 499 }))).toBe("amount_too_low");
-    expect(await code(intent({ itemId: null, amountCents: 100001 }))).toBe("amount_too_high");
+    expect(await code(intent({ itemId: null }))).toBe("invalid");
     expect(await code(intent({ amountCents: 1.5 }))).toBe("invalid");
     expect(await code(intent({ amountCents: -5 }))).toBe("invalid");
     expect(fake.calls).toEqual([]);
@@ -110,12 +110,19 @@ describe("step 1: createPledgeIntent", () => {
     expect(await code(intent())).toBe("business_not_ready");
   });
 
-  it("a closed item is refused, or redirected to the pool if the contributor opted in", async () => {
+  it("refuses a closed item and an unknown one", async () => {
     const item = await addItem(db, biz, { price: 5000, status: "funded" });
     expect(await code(intent({ itemId: item }))).toBe("item_closed");
-    const r = await intent({ itemId: item, sendExtraToPool: true });
-    expect(r.target).toBe("pool");
-    expect(fake.callsTo("setupIntents.create").at(-1)!.params.metadata.item_id).toBe("");
+    expect(await code(intent({ itemId: crypto.randomUUID() }))).toBe("not_found");
+    expect(fake.calls).toEqual([]);
+  });
+
+  it("has no pool or send-extra option: unknown fields are ignored, not honored", async () => {
+    const item = await addItem(db, biz, { price: 10000 });
+    await intent({ itemId: item, sendExtraToPool: true, pool: true });
+    const md = fake.callsTo("setupIntents.create")[0]!.params.metadata;
+    expect(md.item_id).toBe(item);
+    expect(Object.keys(md).join()).not.toMatch(/pool|extra/i);
   });
 });
 
@@ -129,7 +136,7 @@ describe("step 2: finalizeSetupIntent", () => {
     const token = mail.manageUrl.split("/manage/")[1];
     expect(token).toHaveLength(43);
     const row = (await q("select status, amount_cents, manage_token_hash = decode($2,'hex') as hash_ok, consent_text_version from public.pledges where business_id=$1", [biz, hashToken(token).slice(2)]))[0];
-    expect(row).toEqual({ status: "pending", amount_cents: 4000, hash_ok: true, consent_text_version: "v1-draft" });
+    expect(row).toEqual({ status: "pending", amount_cents: 4000, hash_ok: true, consent_text_version: "v2-draft" });
     expect(await q("select 1 from public.pledges where manage_token_hash is not null and encode(manage_token_hash,'escape') like '%' || $1 || '%'", [token])).toEqual([]);
     expect(fake.callsTo("paymentIntents.create")).toEqual([]);
   });
@@ -188,7 +195,6 @@ describe("step 2: finalizeSetupIntent", () => {
     await finalizeSetupIntent(h.deps, lastSi(), biz);
     const amounts = fake.callsTo("paymentIntents.create").map((c) => c.params.amount).sort();
     expect(amounts).toEqual([4000, 6000]);
-    expect(r.target).toBe("item");
   });
 
   it("item filled before confirmation: card detached, nothing recorded, contributor told", async () => {

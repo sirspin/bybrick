@@ -53,7 +53,7 @@ describe("public views", () => {
     expect(biz.rows).toHaveLength(2);
     const cols = (await db.pool.query(
       `select column_name from information_schema.columns
-       where table_schema='public' and table_name in ('public_businesses','public_items','public_pools')`)).rows.map((r) => r.column_name);
+       where table_schema='public' and table_name in ('public_businesses','public_items')`)).rows.map((r) => r.column_name);
     for (const banned of ["stripe_account_id", "owner_user_id", "contributor_email", "contributor_name", "manage_token_hash", "stripe_customer_id", "stripe_payment_method_id"]) {
       expect(cols).not.toContain(banned);
     }

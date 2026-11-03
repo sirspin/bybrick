@@ -114,14 +114,5 @@ create view public.public_items as
   from public.items i
   where i.status not in ('draft', 'cancelled');
 
-create view public.public_pools as
-  select b.id as business_id,
-         coalesce(sum(p.amount_cents), 0)::integer as pooled_cents,
-         count(p.id)::integer as pledge_count
-  from public.businesses b
-  left join public.pledges p
-    on p.business_id = b.id and p.item_id is null and p.status = 'pending'
-  group by b.id;
-
-grant select on public.public_businesses, public.public_items, public.public_pools
+grant select on public.public_businesses, public.public_items
   to anon, authenticated;

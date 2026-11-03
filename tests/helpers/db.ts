@@ -122,13 +122,13 @@ export async function addItem(db: TestDb, businessId: string, o: Partial<{ name:
   return r.rows[0].id as string;
 }
 
-export async function addPledge(db: TestDb, p: { businessId: string; itemId: string | null; amount: number; status?: string; email?: string; sendExtra?: boolean; createdAt?: string }) {
+export async function addPledge(db: TestDb, p: { businessId: string; itemId: string; amount: number; status?: string; email?: string; createdAt?: string }) {
   const r = await db.pool.query(
     `insert into public.pledges (business_id, item_id, contributor_name, contributor_email, amount_cents, status,
-        send_extra_to_pool, manage_token_hash, consent_text_version, consented_at, created_at)
-     values ($1,$2,'Pat Neighbor',$3,$4,$5,$6, decode(md5(random()::text) || md5(random()::text), 'hex'), 'v0-draft', now(), coalesce($7::timestamptz, now()))
+        manage_token_hash, consent_text_version, consented_at, created_at)
+     values ($1,$2,'Pat Neighbor',$3,$4,$5, decode(md5(random()::text) || md5(random()::text), 'hex'), 'v0-draft', now(), coalesce($6::timestamptz, now()))
      returning id`,
-    [p.businessId, p.itemId, p.email ?? "pat@x.test", p.amount, p.status ?? "pending", p.sendExtra ?? false, p.createdAt ?? null],
+    [p.businessId, p.itemId, p.email ?? "pat@x.test", p.amount, p.status ?? "pending", p.createdAt ?? null],
   );
   return r.rows[0].id as string;
 }

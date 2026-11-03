@@ -84,7 +84,7 @@ describe("statementDescriptor", () => {
 });
 
 describe("consent text", () => {
-  const base = { legalName: "Birdy's LLC", itemName: "Reach-in cooler", amountCents: 5000, deadline: new Date("2027-03-15T18:00:00Z"), sendExtraToPool: false, descriptor: "BIRDYS" };
+  const base = { legalName: "Birdy's LLC", itemName: "Reach-in cooler", amountCents: 5000, deadline: new Date("2027-03-15T18:00:00Z"), descriptor: "BIRDYS" };
 
   it("covers the four things Stripe requires for charging later", () => {
     const t = consentText(base);
@@ -96,25 +96,16 @@ describe("consent text", () => {
     expect(t).toContain("BIRDYS");
   });
 
-  it("discloses what happens to leftover money", () => {
-    expect(consentText({ ...base, sendExtraToPool: true })).toMatch(/may be applied to other items/);
+  it("says leftover money is not charged", () => {
     expect(consentText(base)).toMatch(/the rest won't be charged/);
-  });
-
-  it("the pool version states an expiry", () => {
-    const t = consentText({ ...base, itemName: null, deadline: null });
-    expect(t).toMatch(/next 90 days/);
-    expect(t).toMatch(/expires and I won't be charged/);
+    expect(consentText(base)).not.toMatch(/pool|other items|move my pledge/i);
   });
 
   it("changing the wording requires a new version string", () => {
-    const sample = [
-      consentText(base), consentText({ ...base, sendExtraToPool: true }),
-      consentText({ ...base, itemName: null, deadline: null }),
-    ].join("\n---\n");
+    const sample = [consentText(base), consentText({ ...base, deadline: null })].join("\n---\n");
     const hash = crypto.createHash("sha256").update(sample).digest("hex");
     const pinned: Record<string, string> = {
-      "v1-draft": "260cdee7d611fa056660b889217989b9b8c1891f787b5cd759b15b38b8a608b6",
+      "v2-draft": "941f2b2ac9143253e5c7b329a5e3d4a2641f70274b0bde6771112b318fe1d80e",
     };
     expect(pinned[CONSENT_VERSION], `if you changed the wording, bump CONSENT_VERSION; current hash ${hash}`).toBe(hash);
   });

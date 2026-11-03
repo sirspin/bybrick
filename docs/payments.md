@@ -1,5 +1,7 @@
 # Payment layer
 
+Scope: every pledge goes to one item. There is no shared pool and no "send extra elsewhere" option; leftover from an overflowing pledge is simply not charged.
+
 Status: built and tested against a fake Stripe and a real local Postgres. **Never run against real Stripe yet** (no test keys were available). Every Stripe call below is typed against the installed SDK (stripe-node 23.1.0) but unconfirmed in practice.
 
 ## How a pledge moves
@@ -30,7 +32,7 @@ stripe listen --forward-connect-to localhost:3000/api/webhooks/stripe
 - Stripe's processing fee is read from `fee_details` entries of type `stripe_fee` on the charge's balance transaction.
 - `deferredPaymentRequest` for Apple Pay merchant tokens is returned to the UI as `applePay`; it has not been exercised.
 - The platform fee is capped at half of any charge.
-- A pledge's minimum is $5 unless fewer dollars remain on the item; pool pledges cap at $1,000.
+- A pledge's minimum is $5 unless fewer dollars remain on the item.
 
 ## Not built
 

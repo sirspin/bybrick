@@ -69,7 +69,7 @@ create index items_business_id_idx on public.items (business_id, position);
 create table public.pledges (
   id                       uuid primary key default gen_random_uuid(),
   business_id              uuid not null references public.businesses (id) on delete restrict,
-  item_id                  uuid,  -- null = the "wherever it's needed" pool
+  item_id                  uuid not null,
   contributor_name         text not null check (length(contributor_name) between 1 and 120),
   contributor_email        text not null
                            check (contributor_email ~ '^[^@\s]+@[^@\s]+$' and length(contributor_email) <= 254),
@@ -79,12 +79,9 @@ create table public.pledges (
   payment_intent_id        text unique,
   amount_cents             integer not null check (amount_cents between 1 and 100000000),
   charge_cents             integer check (charge_cents >= 0 and charge_cents <= amount_cents),
-  send_extra_to_pool       boolean not null default false,
   status                   public.pledge_status not null default 'pending',
   -- SHA-256 of a 32+ byte random token. The token itself is never stored.
-  -- Null only for pledges split off another pledge (they are managed via the parent's link).
-  manage_token_hash        bytea unique check (length(manage_token_hash) = 32),
-  split_from_pledge_id     uuid references public.pledges (id) on delete restrict,
+  manage_token_hash        bytea not null unique check (length(manage_token_hash) = 32),
   -- Which consent wording the contributor agreed to, and when.
   consent_text_version     text not null,
   consented_at             timestamptz not null,
@@ -97,11 +94,9 @@ create table public.pledges (
   -- SHA-256 of the token in the "finish your payment" email (separate from the manage token).
   action_token_hash        bytea unique check (length(action_token_hash) = 32),
   foreign key (item_id, business_id) references public.items (id, business_id) on delete restrict,
-  check (manage_token_hash is not null or split_from_pledge_id is not null),
   check (status <> 'charged' or (charge_cents is not null and charged_at is not null))
 );
 create index pledges_item_status_idx on public.pledges (item_id, status, created_at);
-create index pledges_business_pool_idx on public.pledges (business_id, status, created_at) where item_id is null;
 
 -- ------------------------------------------------------------ ledger_entries
 -- APPEND-ONLY (trigger in 0002). Amounts are signed from the business's point of view:

@@ -1,6 +1,8 @@
 -- Funding logic. Everything that moves money-state runs inside one Postgres transaction
 -- so two simultaneous pledges can never both think they finished an item.
 --
+-- Every pledge goes to one item. There is no shared pool.
+--
 -- Lock order, always: business row first, then item row. Never the reverse.
 -- Functions here only change database state and return what the server should charge.
 -- They never talk to Stripe and never write ledger income (that comes from verified
@@ -63,25 +65,11 @@ language sql immutable as $$
   );
 $$;
 
--- Copy of a pledge's leftover amount, parked in the pool. Keeps the original's age so
--- oldest-first fairness holds, and shares its saved payment method.
-create function private.split_to_pool(r public.pledges, p_amount integer) returns void
-language sql as $$
-  insert into public.pledges
-    (business_id, item_id, contributor_name, contributor_email, stripe_customer_id,
-     stripe_payment_method_id, amount_cents, send_extra_to_pool, split_from_pledge_id,
-     consent_text_version, consented_at, created_at)
-  values
-    (r.business_id, null, r.contributor_name, r.contributor_email, r.stripe_customer_id,
-     r.stripe_payment_method_id, p_amount, true, r.id,
-     r.consent_text_version, r.consented_at, r.created_at);
-$$;
-
 -- --------------------------------------------------------------- fund_item
 -- If the item's pending pledges reach its goal, mark it funded and plan the charges.
--- Oldest first. The pledge that crosses the goal is charged only what is needed.
--- Leftover from a pledge with send_extra_to_pool becomes a new pending pool pledge;
--- otherwise it is simply not charged. Caller must already hold the business lock.
+-- Oldest first. The pledge that crosses the goal is charged only what is needed; the rest of
+-- that pledge is simply not charged. A pledge that arrives after the goal is already covered
+-- is cancelled and charged nothing. Caller must already hold the business lock.
 create function private.fund_item(p_item uuid) returns jsonb
 language plpgsql as $$
 declare
@@ -89,7 +77,6 @@ declare
   pend integer;
   allocated integer := 0;
   chg integer;
-  exc integer;
   r public.pledges;
   out jsonb := '[]'::jsonb;
 begin
@@ -108,7 +95,6 @@ begin
     order by created_at, id
   loop
     chg := least(r.amount_cents, greatest(it.goal_cents - allocated, 0));
-    exc := r.amount_cents - chg;
     allocated := allocated + chg;
 
     if chg > 0 then
@@ -120,71 +106,8 @@ begin
       -- The item filled before this pledge counted. Nothing is charged for it.
       update public.pledges set charge_cents = 0, status = 'cancelled' where id = r.id;
     end if;
-
-    if exc > 0 and r.send_extra_to_pool then
-      perform private.split_to_pool(r, exc);
-    end if;
   end loop;
 
-  return out;
-end;
-$$;
-
--- ----------------------------------------------------------- allocate_pool
--- When the pool covers the remaining balance of the open item closest to its goal,
--- move pool pledges (oldest first) onto it, which triggers funding. Repeats while the
--- pool can still finish something. Caller must already hold the business lock.
-create function private.allocate_pool(p_business uuid) returns jsonb
-language plpgsql as $$
-declare
-  out jsonb := '[]'::jsonb;
-  pool_total integer;
-  cand_id uuid;
-  cand_remaining integer;
-  moved integer;
-  r record;
-  guard integer := 0;
-begin
-  loop
-    guard := guard + 1;
-    exit when guard > 25;
-
-    select coalesce(sum(amount_cents), 0) into pool_total
-    from public.pledges where business_id = p_business and item_id is null and status = 'pending';
-    exit when pool_total = 0;
-
-    select c.id, c.remaining into cand_id, cand_remaining
-    from (
-      select it.id, it.deadline, it."position",
-             it.goal_cents - coalesce((
-               select sum(p.amount_cents) from public.pledges p
-               where p.item_id = it.id and p.status = 'pending'), 0) as remaining
-      from public.items it
-      where it.business_id = p_business and it.status = 'open' and it.deadline > now()
-    ) c
-    where c.remaining > 0
-    order by c.remaining, c.deadline, c."position", c.id
-    limit 1;
-    exit when cand_id is null;
-    exit when pool_total < cand_remaining;
-
-    perform 1 from public.items where id = cand_id for no key update;
-
-    moved := 0;
-    for r in
-      select id, amount_cents from public.pledges
-      where business_id = p_business and item_id is null and status = 'pending'
-      order by created_at, id
-    loop
-      exit when moved >= cand_remaining;
-      update public.pledges set item_id = cand_id where id = r.id;
-      moved := moved + r.amount_cents;
-    end loop;
-
-    update public.items set goal_locked_at = coalesce(goal_locked_at, now()) where id = cand_id;
-    out := out || private.fund_item(cand_id);
-    cand_id := null;
-  end loop;
   return out;
 end;
 $$;
@@ -192,24 +115,20 @@ $$;
 -- ------------------------------------------------------------ create_pledge
 -- Called once the contributor's payment method is saved (SetupIntent confirmed).
 -- Returns {pledge_id, outcome, charges[]}.
---   outcome: 'pending'        pledge recorded, item still open
---            'funded'         this pledge (or a pool move it triggered) finished an item
---            'moved_to_pool'  item had closed and the contributor opted to send it to the pool
---            'item_closed'    item had closed and no pledge was recorded
---            'duplicate'      this setup intent was already recorded (replay)
+--   outcome: 'pending'      pledge recorded, item still open
+--            'funded'       this pledge finished the item
+--            'item_closed'  the item is no longer open; no pledge was recorded
+--            'duplicate'    this setup intent was already recorded (replay)
 create function public.create_pledge(
   p_business_id uuid, p_item_id uuid, p_name text, p_email text, p_amount_cents integer,
-  p_send_extra boolean, p_manage_token_hash bytea, p_consent_version text,
-  p_consented_at timestamptz, p_customer_id text, p_payment_method_id text, p_setup_intent_id text
+  p_manage_token_hash bytea, p_consent_version text, p_consented_at timestamptz,
+  p_customer_id text, p_payment_method_id text, p_setup_intent_id text
 ) returns jsonb
 language plpgsql as $$
 declare
   it public.items;
   new_id uuid;
-  target uuid := p_item_id;
-  outcome text := 'pending';
   charges jsonb := '[]'::jsonb;
-  extra boolean := p_send_extra;
 begin
   perform private.lock_business(p_business_id);
 
@@ -219,66 +138,44 @@ begin
     return jsonb_build_object('pledge_id', null, 'outcome', 'duplicate', 'charges', charges);
   end if;
 
-  if p_item_id is not null then
-    select * into it from public.items where id = p_item_id for no key update;
-    if not found or it.business_id <> p_business_id then
-      raise exception 'item does not belong to this business' using errcode = 'foreign_key_violation';
-    end if;
-    if it.status <> 'open' or it.deadline <= now() then
-      if p_send_extra then
-        target := null;
-        outcome := 'moved_to_pool';
-      else
-        return jsonb_build_object('pledge_id', null, 'outcome', 'item_closed', 'charges', charges);
-      end if;
-    end if;
+  select * into it from public.items where id = p_item_id for no key update;
+  if not found or it.business_id <> p_business_id then
+    raise exception 'item does not belong to this business' using errcode = 'foreign_key_violation';
   end if;
-
-  -- A pool pledge's leftover always returns to the pool.
-  if target is null then extra := true; end if;
+  if it.status <> 'open' or it.deadline <= now() then
+    return jsonb_build_object('pledge_id', null, 'outcome', 'item_closed', 'charges', charges);
+  end if;
 
   insert into public.pledges
     (business_id, item_id, contributor_name, contributor_email, stripe_customer_id,
-     stripe_payment_method_id, setup_intent_id, amount_cents, send_extra_to_pool,
+     stripe_payment_method_id, setup_intent_id, amount_cents,
      manage_token_hash, consent_text_version, consented_at)
   values
-    (p_business_id, target, p_name, p_email, p_customer_id, p_payment_method_id,
-     p_setup_intent_id, p_amount_cents, extra, p_manage_token_hash, p_consent_version,
-     p_consented_at)
+    (p_business_id, p_item_id, p_name, p_email, p_customer_id, p_payment_method_id,
+     p_setup_intent_id, p_amount_cents, p_manage_token_hash, p_consent_version, p_consented_at)
   returning id into new_id;
 
-  if target is not null then
-    update public.items set goal_locked_at = coalesce(goal_locked_at, now()) where id = target;
-    charges := private.fund_item(target);
-  end if;
-  charges := charges || private.allocate_pool(p_business_id);
+  update public.items set goal_locked_at = coalesce(goal_locked_at, now()) where id = p_item_id;
+  charges := private.fund_item(p_item_id);
 
-  if jsonb_array_length(charges) > 0 and outcome = 'pending' then outcome := 'funded'; end if;
-
-  return jsonb_build_object('pledge_id', new_id, 'outcome', outcome, 'charges', charges);
+  return jsonb_build_object(
+    'pledge_id', new_id,
+    'outcome', case when jsonb_array_length(charges) > 0 then 'funded' else 'pending' end,
+    'charges', charges);
 end;
 $$;
 
--- ------------------------------------------------------- manage-link actions
--- The token hash identifies one contributor's pledge. These act on that pledge, or on
--- its still-pending split-off pool pledges if the pledge itself is already resolved.
--- Nothing can change once a pledge is charged, cancelled or expired.
-create function private.manageable(p_hash bytea) returns table (id uuid, business_id uuid)
-language sql stable as $$
-  select p.id, p.business_id
-  from public.pledges p
-  where p.status = 'pending'
-    and (p.manage_token_hash = p_hash
-         or p.split_from_pledge_id in (select q.id from public.pledges q where q.manage_token_hash = p_hash));
-$$;
-
+-- ----------------------------------------------------------- cancel_pledge
+-- The token hash identifies one contributor's pledge. It can be cancelled only while pending;
+-- nothing can change once a pledge is charged, cancelled or expired.
 create function public.cancel_pledge(p_manage_token_hash bytea) returns jsonb
 language plpgsql as $$
 declare
   biz uuid;
   out jsonb;
 begin
-  select m.business_id into biz from private.manageable(p_manage_token_hash) m limit 1;
+  select business_id into biz from public.pledges
+  where manage_token_hash = p_manage_token_hash and status = 'pending';
   if biz is null then
     return jsonb_build_object('outcome', 'not_allowed', 'pledges', '[]'::jsonb);
   end if;
@@ -286,7 +183,7 @@ begin
 
   with u as (
     update public.pledges set status = 'cancelled'
-    where status = 'pending' and id in (select m.id from private.manageable(p_manage_token_hash) m)
+    where manage_token_hash = p_manage_token_hash and status = 'pending'
     returning id, stripe_payment_method_id
   )
   select coalesce(jsonb_agg(jsonb_build_object('pledge_id', id, 'stripe_payment_method_id', stripe_payment_method_id)), '[]')
@@ -301,54 +198,12 @@ begin
 end;
 $$;
 
-create function public.move_pledge_to_pool(p_manage_token_hash bytea) returns jsonb
-language plpgsql as $$
-declare
-  biz uuid;
-  moved integer;
-  charges jsonb;
-begin
-  select m.business_id into biz
-  from private.manageable(p_manage_token_hash) m
-  join public.pledges p on p.id = m.id
-  where p.item_id is not null limit 1;
-  if biz is null then
-    return jsonb_build_object('outcome', 'not_allowed', 'charges', '[]'::jsonb);
-  end if;
-  perform private.lock_business(biz);
-
-  update public.pledges set item_id = null, send_extra_to_pool = true
-  where status = 'pending' and item_id is not null
-    and id in (select m.id from private.manageable(p_manage_token_hash) m);
-  get diagnostics moved = row_count;
-  if moved = 0 then
-    return jsonb_build_object('outcome', 'not_allowed', 'charges', '[]'::jsonb);
-  end if;
-
-  charges := private.allocate_pool(biz);
-  return jsonb_build_object('outcome', 'moved_to_pool', 'charges', charges);
-end;
-$$;
-
--- ------------------------------------------------------------- allocate (RPC)
--- Call after an owner opens a new item so existing pool money can go to work.
-create function public.allocate_pool(p_business_id uuid) returns jsonb
-language plpgsql as $$
-begin
-  perform private.lock_business(p_business_id);
-  return jsonb_build_object('charges', private.allocate_pool(p_business_id));
-end;
-$$;
-
 -- ----------------------------------------------------------------- expire_due
--- Unfunded items past their deadline expire, along with their pledges. Pool pledges
--- older than p_pool_ttl expire too. Nobody is charged. Returns the expired pledges and
--- whether their saved payment method can now be detached.
--- p_pool_ttl is an assumption (90 days) pending a product decision.
+-- Unfunded items past their deadline expire, along with their pledges. Nobody is charged.
+-- Returns the expired pledges and whether their saved payment method can now be detached.
 -- p_business_id limits the sweep to one business (the scheduled job passes null).
 create function public.expire_due(
-  p_now timestamptz default now(), p_pool_ttl interval default interval '90 days',
-  p_business_id uuid default null
+  p_now timestamptz default now(), p_business_id uuid default null
 ) returns jsonb
 language plpgsql as $$
 declare
@@ -357,13 +212,9 @@ declare
   out jsonb := '[]'::jsonb;
 begin
   for b in
-    select distinct s.business_id from (
-      select business_id from public.items where status = 'open' and deadline <= p_now
-      union
-      select business_id from public.pledges
-        where item_id is null and status = 'pending' and created_at <= p_now - p_pool_ttl
-    ) s
-    where p_business_id is null or s.business_id = p_business_id
+    select distinct business_id from public.items
+    where status = 'open' and deadline <= p_now
+      and (p_business_id is null or business_id = p_business_id)
     order by 1
   loop
     perform private.lock_business(b);
@@ -374,9 +225,7 @@ begin
     with u as (
       update public.pledges p set status = 'expired'
       where p.business_id = b and p.status = 'pending'
-        and ((p.item_id is not null and exists (
-                select 1 from public.items i where i.id = p.item_id and i.status = 'expired'))
-             or (p.item_id is null and p.created_at <= p_now - p_pool_ttl))
+        and exists (select 1 from public.items i where i.id = p.item_id and i.status = 'expired')
       returning p.id, p.stripe_payment_method_id
     )
     select coalesce(jsonb_agg(jsonb_build_object('pledge_id', id, 'stripe_payment_method_id', stripe_payment_method_id)), '[]')
@@ -462,9 +311,8 @@ do $$
 declare f text;
 begin
   for f in select unnest(array[
-    'create_pledge(uuid,uuid,text,text,integer,boolean,bytea,text,timestamptz,text,text,text)',
-    'cancel_pledge(bytea)', 'move_pledge_to_pool(bytea)', 'allocate_pool(uuid)',
-    'expire_due(timestamptz,interval,uuid)', 'close_it_out(uuid,uuid)'
+    'create_pledge(uuid,uuid,text,text,integer,bytea,text,timestamptz,text,text,text)',
+    'cancel_pledge(bytea)', 'expire_due(timestamptz,uuid)', 'close_it_out(uuid,uuid)'
   ]) loop
     execute format('revoke execute on function public.%s from public, anon, authenticated', f);
     execute format('grant execute on function public.%s to service_role', f);

@@ -29,7 +29,7 @@ const ledger = (pledge: string) => q("select kind, amount_cents from public.ledg
 /** A funded one-pledge item whose charge has been sent (PaymentIntent exists in the fake). */
 async function chargedOnStripe(price = 10000) {
   const item = await addItem(db, biz, { price });
-  await createPledgeIntent(h.deps, { businessId: biz, itemId: item, name: "Pat", email: `p${crypto.randomBytes(3).toString("hex")}@x.test`, amountCents: price, sendExtraToPool: false, consent: true, turnstileToken: "t" }, `7.7.7.${++ipN}`);
+  await createPledgeIntent(h.deps, { businessId: biz, itemId: item, name: "Pat", email: `p${crypto.randomBytes(3).toString("hex")}@x.test`, amountCents: price, consent: true, turnstileToken: "t" }, `7.7.7.${++ipN}`);
   const si = [...fake.setupIntents.keys()].pop()!;
   fake.completeSetup(si);
   fake.state.nextCharge = { kind: "processing" };
@@ -157,7 +157,7 @@ describe("refunds", () => {
 describe("setup intents via webhook", () => {
   it("setup_intent.succeeded creates the pledge once, even with the return page racing it", async () => {
     const item = await addItem(db, biz, { price: 10000 });
-    await createPledgeIntent(h.deps, { businessId: biz, itemId: item, name: "Pat", email: "race@x.test", amountCents: 3000, sendExtraToPool: false, consent: true, turnstileToken: "t" }, "6.6.6.6");
+    await createPledgeIntent(h.deps, { businessId: biz, itemId: item, name: "Pat", email: "race@x.test", amountCents: 3000, consent: true, turnstileToken: "t" }, "6.6.6.6");
     const siId = [...fake.setupIntents.keys()].pop()!;
     fake.completeSetup(siId);
     const si = fake.setupIntents.get(siId);
@@ -258,7 +258,7 @@ describe("scheduled jobs", () => {
 
   it("expires past-deadline items: nobody charged, card detached, contributor told", async () => {
     const item = await addItem(db, biz, { price: 10000 });
-    await createPledgeIntent(h.deps, { businessId: biz, itemId: item, name: "Pat", email: "exp@x.test", amountCents: 2000, sendExtraToPool: false, consent: true, turnstileToken: "t" }, "5.5.5.5");
+    await createPledgeIntent(h.deps, { businessId: biz, itemId: item, name: "Pat", email: "exp@x.test", amountCents: 2000, consent: true, turnstileToken: "t" }, "5.5.5.5");
     const si = [...fake.setupIntents.keys()].pop()!;
     const pm = fake.completeSetup(si);
     await finalizeSetupIntent(h.deps, si, biz);
